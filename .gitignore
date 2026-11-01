@@ -1,0 +1,8 @@
+build/
+.zig-cache/
+dist/
+scripts/node_modules/
+scripts/uitest/node_modules/
+scripts/.e2e_*
+*.h
+.env

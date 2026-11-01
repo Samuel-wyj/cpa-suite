@@ -1,0 +1,239 @@
+// CPA Suite hook: the plugin ID comes from the server (meta tag), never hardcoded.
+const PLUGIN_ID =
+  document.querySelector('meta[name="cpa-plugin-id"]')?.content || (location.pathname.match(/\/plugins\/([^/]+)\//) || [])[1];
+const PLUGIN_BASE = "/v0/management/plugins/" + PLUGIN_ID;
+const ACCOUNT_BASE = "/v0/resource/plugins/" + PLUGIN_ID;
+const CALLER_SCOPE_SALT = "cli-proxy-api:caller-scope:v1\u0000";
+const DISPLAY_SEPARATOR = "\u2009·\u2009";
+const DISPLAY_SLASH = "\u2009/\u2009";
+const $ = (id) => document.getElementById(id);
+const { message: m, setText, setAttribute: setTextAttribute, UIError } = window.billingI18n;
+const locale = () => window.billingI18n.locale();
+window.billingI18n.initialize();
+
+/* A same-origin iframe can borrow the panel's obfuscated management key. When
+ * it is unavailable, the standalone login can use its own encrypted vault. */
+const CREDENTIAL_DB = "cpa-key-billing-credentials";
+const CREDENTIAL_STORE = "vault";
+const CREDENTIAL_KEY = "wrapping-key";
+const SESSION_CREDENTIAL_PREFIX = "cpa-key-billing.session.v1.";
+const VIEW_PREFERENCE_PREFIX = "cpa-key-billing.view.v1.";
+
+function readPanelKey() {
+  const fromStore = panelStoredValue("cli-proxy-auth")?.state?.managementKey;
+  if (typeof fromStore === "string" && fromStore.trim()) return fromStore.trim();
+
+  const direct = panelStoredValue("managementKey");
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  return "";
+}
+
+const embedded = window.parent !== window;
+document.body.classList.toggle("embedded", embedded);
+const ADMIN_TAB_IDS = ["keys", "analysis", "request-events", "errors", "auth-files", "clients", "overview", "modules", "settings"]; // CPA Suite hook: clients, overview, modules
+const ACCOUNT_TAB_IDS = ["subscription", "analysis", "request-events", "errors", "auth-files"];
+const PAGE_ROUTE_KEY = "cpa-key-billing.route.v1." + (embedded ? "embedded" : "standalone");
+
+function parsePageRoute(value) {
+  const [role, tab] = value.split("/");
+  if (role === "account") return { role, tab: ACCOUNT_TAB_IDS.includes(tab) ? tab : "subscription" };
+  if (role === "admin") return { role, tab: ADMIN_TAB_IDS.includes(tab) ? tab : "keys" };
+  return null;
+}
+
+function pageRoute() {
+  const direct = parsePageRoute(location.hash.slice(1));
+  if (direct) return direct;
+  try {
+    const stored = parsePageRoute(sessionStorage.getItem(PAGE_ROUTE_KEY) || "");
+    if (stored) return stored;
+  } catch (_) {}
+  return { role: "admin", tab: "keys" };
+}
+
+function writePageRoute(role, tab) {
+  try { sessionStorage.setItem(PAGE_ROUTE_KEY, role + "/" + tab); } catch (_) {}
+  const hash = "#" + role + "/" + tab;
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+}
+
+const initialRoute = pageRoute();
+
+let authKey = "";
+let currentRole = "";
+let sessionGeneration = 0;
+const activeRequests = new Set();
+let loginMode = initialRoute.role;
+let loginModeRequest = 0;
+function emptyAuthQuotaState() { return { authQuotas: new Map(), authQuotaLoading: new Set(), authQuotaErrors: new Map() }; }
+function emptyAdminUIState() { return { ...emptyAuthQuotaState(), keySubmissions: new Set(), authStatusSubmissions: new Map() }; }
+let adminUIState = emptyAdminUIState();
+let accountUIState = emptyAuthQuotaState();
+const authQuotaGeneration = { admin: 0, account: 0 };
+const credentialScope = { admin: "", account: "" };
+let accountTab = initialRoute.role === "account" ? initialRoute.tab : "subscription";
+
+function openCredentialDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB || !window.crypto?.subtle) {
+      reject(new UIError(m("ui.secure_key_storage_is_not_supported_in_this_environment")));
+      return;
+    }
+    const request = indexedDB.open(CREDENTIAL_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(CREDENTIAL_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new UIError(m("ui.browser_credential_storage_failed")));
+  });
+}
+
+async function credentialTransaction(mode, operation) {
+  const db = await openCredentialDB();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(CREDENTIAL_STORE, mode);
+      const request = operation(transaction.objectStore(CREDENTIAL_STORE));
+      transaction.oncomplete = () => resolve(request?.result);
+      transaction.onerror = transaction.onabort = () => reject(transaction.error || new UIError(m("ui.browser_credential_storage_failed")));
+    });
+  } finally { db.close(); }
+}
+
+async function deleteCredential(role) {
+  suiteDeleteCredential(role); // CPA Suite hook: plain-http fallback store
+  try { await credentialTransaction("readwrite", (store) => store.delete(role)); } catch (_) {}
+}
+
+async function wrappingKey() {
+  const key = await credentialTransaction("readonly", (store) => store.get(CREDENTIAL_KEY));
+  if (key) return key;
+  const created = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  const existing = await credentialTransaction("readwrite", (store) => {
+    // Another tab may have created the shared key while generation was pending.
+    const request = store.get(CREDENTIAL_KEY);
+    request.onsuccess = () => { if (!request.result) store.put(created, CREDENTIAL_KEY); };
+    return request;
+  });
+  return existing || created;
+}
+
+async function saveCredential(role, credential, remember) {
+  if (!suiteSecureStorage()) return suiteSaveCredential(role, credential, remember); // CPA Suite hook: plain http
+  const generation = sessionGeneration;
+  const key = await wrappingKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(credential));
+  const saved = { iv: Array.from(iv), data: Array.from(new Uint8Array(data)) };
+  await credentialTransaction("readwrite", (store) => {
+    if (generation !== sessionGeneration) return;
+    return remember ? store.put(saved, role) : store.delete(role);
+  });
+  if (generation !== sessionGeneration) return;
+  sessionStorage.setItem(SESSION_CREDENTIAL_PREFIX + role, JSON.stringify(saved));
+}
+
+async function recalledCredential(role, includeSession = false) {
+  if (!suiteSecureStorage()) return suiteRecalledCredential(role, includeSession); // CPA Suite hook: plain http
+  try {
+    const session = includeSession ? sessionStorage.getItem(SESSION_CREDENTIAL_PREFIX + role) : null;
+    const saved = session !== null ? JSON.parse(session) : await credentialTransaction("readonly", (store) => store.get(role));
+    if (!saved?.iv || !saved?.data) return "";
+    const key = await credentialTransaction("readonly", (store) => store.get(CREDENTIAL_KEY));
+    const data = await crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(saved.iv) }, key, new Uint8Array(saved.data));
+    return new TextDecoder().decode(data).trim();
+  } catch (_) { return ""; }
+}
+
+// CLIProxyAPI HTML-escapes every string in a plugin management response, so a
+// label saved as "A & B" comes back as "A &amp; B". Left alone it would gain
+// another layer on every round trip, so responses are decoded on arrival.
+const ENTITIES = [[/&lt;/g, "<"], [/&gt;/g, ">"], [/&#34;/g, '"'], [/&#39;/g, "'"], [/&amp;/g, "&"]];
+function unescapeDeep(value) {
+  if (typeof value === "string") {
+    let out = value;
+    for (const [pattern, replacement] of ENTITIES) out = out.replace(pattern, replacement);
+    return out;
+  }
+  if (Array.isArray(value)) return value.map(unescapeDeep);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value)) out[key] = unescapeDeep(value[key]);
+    return out;
+  }
+  return value;
+}
+
+class AuthError extends UIError {}
+class StaleRequestError extends Error {}
+
+async function api(method, path, body, opts) {
+  const generation = sessionGeneration;
+  const init = { method, cache: "no-store", headers: { ...opts?.headers, Authorization: "Bearer " + (opts?.key ?? authKey) } };
+  const timeoutMS = Number(opts?.timeoutMS ?? 30000);
+  const controller = new AbortController();
+  if (!opts?.command) activeRequests.add(controller);
+  const timeout = setTimeout(() => controller.abort(), timeoutMS);
+  init.signal = controller.signal;
+  if (body !== undefined && body !== null) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  let resp, text;
+  try {
+    resp = await fetch(location.origin + path, init);
+    text = await resp.text();
+    if (generation !== sessionGeneration) throw new StaleRequestError();
+  } catch (error) {
+    if (generation !== sessionGeneration) throw new StaleRequestError();
+    if (controller.signal.aborted) throw new UIError(m("ui.request_timed_out"));
+    if (error instanceof TypeError) throw new UIError(m("ui.unable_to_connect_to_the_server"));
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    activeRequests.delete(controller);
+  }
+  let payload = null;
+  if (text) { try { payload = JSON.parse(text); } catch (_) { if (resp.ok) throw new UIError(m("ui.invalid_server_response")); } }
+  if (!resp.ok) {
+    const detail = payload?.error?.message ?? payload?.error;
+    const decoded = typeof detail === "string" ? unescapeDeep(detail).replace(/\s+/g, " ").trim() : "";
+    // Proxy error pages and response dumps are not user-facing messages.
+    const fallback = decoded && !/<[^>]+>/.test(decoded) ? decoded.slice(0, 200) + (decoded.length > 200 ? "…" : "") : "";
+    const message = window.billingI18n.serverMessage(unescapeDeep(payload?.error), fallback);
+    if ((resp.status === 401 || (resp.status === 403 && !opts?.keepSessionOnForbidden)) && !opts?.auxiliaryCredential) {
+      throw new AuthError(
+        message || (currentRole === "account" ? m("ui.invalid_api_key_or_access_denied") : m("ui.invalid_management_key_or_access_denied"))
+      );
+    }
+    throw new UIError(
+      message ||
+        (resp.status >= 500
+          ? m("ui.service_unavailable_http_value", { v0: resp.status })
+          : m("ui.server_error_http_value", { v0: resp.status }))
+    );
+  }
+  return opts?.raw ? payload : unescapeDeep(payload);
+}
+
+const plugin = (method, path, body, opts) => api(method, PLUGIN_BASE + path, body, opts);
+const accountAPI = (path, opts) => api("GET", ACCOUNT_BASE + path, null, { ...opts, raw: true });
+
+function requireObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new UIError(m("ui.invalid_response_for_value", { v0: label }));
+  return value;
+}
+
+function requireArray(value, label) {
+  if (!Array.isArray(value)) throw new UIError(m("ui.invalid_response_for_value", { v0: label }));
+  return value;
+}
+
+async function settleLoads(tasks) {
+  const results = await Promise.allSettled(tasks);
+  const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+  // Let every independent read finish, but never swallow unexpected errors.
+  // Authentication takes precedence over ordinary failures and cancellation.
+  const failure =
+    failures.find((error) => error instanceof AuthError) || failures.find((error) => !(error instanceof StaleRequestError)) || failures[0];
+  if (failure) throw failure;
+}

@@ -1,0 +1,67 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build-zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Install zig
+        run: |
+          pip install --user "ziglang==0.13.0"
+          d=$(python3 -c 'import ziglang,os;print(os.path.dirname(ziglang.__file__))')
+          echo "$d" >> "$GITHUB_PATH"
+      - name: Check tag matches version
+        run: |
+          v=$(sed -n 's/^[[:space:]]*Version[[:space:]]*= "\([0-9.]*\)"/\1/p' internal/suite/config.go)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != v$v"; exit 1; }
+      - run: go test ./...
+      - run: OUT_DIR=out scripts/build.sh linux/amd64 linux/arm64 windows/amd64
+      - uses: actions/upload-artifact@v4
+        with: { name: zig, path: "out/*.zip" }
+  build-darwin:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: Build darwin/${{ matrix.arch }}
+        run: |
+          a=${{ matrix.arch }}; [ $a = amd64 ] && ca=x86_64 || ca=arm64
+          CC="clang -arch $ca -mmacosx-version-min=11.0" OUT_DIR=out scripts/build.sh darwin/$a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-${{ matrix.arch }}
+          path: out/*.zip
+  release:
+    needs: [build-zig, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: art, merge-multiple: true }
+      - name: Checksums and layout check
+        run: |
+          cd art
+          ls -l
+          [ $(ls cpa-suite_*.zip | wc -l) = 5 ] || { echo "expected 5 zips"; exit 1; }
+          for z in cpa-suite_*.zip; do
+            n=$(unzip -Z1 "$z"); [ $(echo "$n" | wc -l) = 1 ] || exit 1
+            case $z in *_windows_*) [ "$n" = cpa-suite.dll ];; *_darwin_*) [ "$n" = cpa-suite.dylib ];; *) [ "$n" = cpa-suite.so ];; esac
+          done
+          sha256sum cpa-suite_*.zip > checksums.txt
+          cat checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" art/cpa-suite_*.zip art/checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "CPA Suite ${GITHUB_REF_NAME}. Based on cpa-key-billing v1.3.20 (MIT). See CHANGELOG.md."

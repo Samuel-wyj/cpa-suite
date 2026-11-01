@@ -1,0 +1,16 @@
+<!DOCTYPE html><html><head><!-- Test copy of cpa-suite-demo/cpamp-shell-sim.html; injects the CPAMP semantic tokens style.css maps (--app-*, --color-primary). --><meta charset="utf-8"><style>
+body{margin:0;font:14px Inter,-apple-system,"PingFang SC",sans-serif;background:linear-gradient(120deg,#f0f7ff,#e7f2ff 50%,#edf7ff);height:100vh;display:flex;color:#2c3e50}
+body.d{background:linear-gradient(120deg,#0b1324,#0a1426 50%,#091521);color:#e5e5e5}
+.sb{width:210px;padding:16px 10px;background:rgba(255,255,255,.7);border-right:1px solid rgba(15,23,42,.08)}.d .sb{background:rgba(24,28,40,.9);border-color:rgba(255,255,255,.08)}
+.sb b{display:block;font-size:16px;margin:0 8px 18px}.sb div{padding:9px 10px;border-radius:10px;margin:2px 0;color:#5f6c7b}.d .sb div{color:#a3a3a3}
+.sb div.on{background:rgba(59,130,246,.12);color:#3b82f6;font-weight:600}.sb small{display:block;color:#8b95a6;margin:14px 10px 4px;font-size:11px}
+.mn{flex:1;display:flex;flex-direction:column;min-width:0}.hd{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid rgba(15,23,42,.08)}.d .hd{border-color:rgba(255,255,255,.08)}
+iframe{flex:1;border:0;width:100%}
+</style></head><body><div class="sb"><b>◆ CPA Manager Plus</b><div>仪表盘</div><div>使用统计</div><div>账号管理</div><div>请求日志</div><div>配置</div><small>插件</small><div>插件管理</div><div>插件商店</div><div class="on">CPA Suite</div></div>
+<div class="mn"><div class="hd"><span>CPA Suite</span><span style="color:#8b95a6">CPAMP 嵌入模拟 · 中文 · 主题</span></div><iframe id="f" src="about:blank"></iframe></div>
+<script>
+const dark=location.search.includes("dark");if(dark)document.body.classList.add("d");
+const V=dark?{"--app-bg":"#0a0a0a","--app-surface":"rgba(24,28,40,.9)","--app-surface-strong":"#181c28","--app-text-primary":"#e5e5e5","--app-text-regular":"#a3a3a3","--app-text-muted":"#7a7a7a","--app-border":"rgba(255,255,255,.08)","--color-primary":"#60a5fa","--bg-primary":"rgba(24,28,40,.9)","--app-surface-muted":"rgba(255,255,255,.08)","--text-primary":"#e5e5e5","--text-secondary":"#a3a3a3","--text-tertiary":"#7a7a7a","--border-color":"rgba(255,255,255,.08)","--primary-color":"#60a5fa","--app-accent-soft":"rgba(96,165,250,.18)"}:{"--app-bg":"#eff2f7","--app-surface":"rgba(255,255,255,.9)","--app-surface-strong":"#fff","--app-text-primary":"#2c3e50","--app-text-regular":"#5f6c7b","--app-text-muted":"#8b95a6","--app-border":"rgba(15,23,42,.08)","--color-primary":"#3b82f6","--bg-primary":"rgba(255,255,255,.9)","--app-surface-muted":"rgba(255,255,255,.62)","--text-primary":"#2c3e50","--text-secondary":"#5f6c7b","--text-tertiary":"#8b95a6","--border-color":"rgba(15,23,42,.08)","--primary-color":"#3b82f6","--app-accent-soft":"rgba(59,130,246,.12)"};
+const f=document.getElementById("f");document.documentElement.setAttribute("data-theme",dark?"dark":"white");f.src="__SRC__";
+f.onload=()=>{const d=f.contentDocument;const r=d.documentElement;r.setAttribute("data-cpamp-plugin-host","true");r.setAttribute("data-theme",dark?"dark":"white");const s=d.createElement("style");s.id="cpamp-plugin-host-style";s.textContent=":where(html[data-cpamp-plugin-host='true']){"+Object.entries(V).map(([k,v])=>k+":"+v).join(";")+";--cpamp-plugin-font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}";d.head.prepend(s);};
+</script></body></html>
